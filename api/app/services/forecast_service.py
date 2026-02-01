@@ -1,19 +1,20 @@
-import pandas as pd
-from pathlib import Path
+from app.services.prophet_service import ProphetForecastService
+from app.services.random_forest_service import RandomForestForecastService
+from app.services.xgboost_service import XGBoostForecastService
 
-
-class EnergyDataService:
+class EnergyForecastService:
     def __init__(self):
-        base_dir = Path(__file__).resolve().parent.parent
-        self.data_path = base_dir / "data" / "germany-energy-clean.csv"
-
-    def load_data(self):
-        df = pd.read_csv(self.data_path)
-
-        print("Data loaded successfully")
-        print("Shape:", df.shape)
-        print("Columns:", list(df.columns))
-        print("\nFirst 5 rows:")
-        print(df.head())
-
-        return df
+        self.prophet = ProphetForecastService()
+        self.rf = RandomForestForecastService()
+        self.xgb = XGBoostForecastService()
+    
+    def prophet_forecast(self, years_ahead=10):
+        return self.prophet.train_and_forecast(years_ahead)
+    
+    def random_forest_forecast(self, years_ahead=10):
+        self.rf.train_model()
+        return self.rf.predict(years_ahead)
+    
+    def xgboost_forecast(self, years_ahead=10):
+        self.xgb.train_model()
+        return self.xgb.predict(years_ahead)
