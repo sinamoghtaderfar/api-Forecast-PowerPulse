@@ -13,9 +13,13 @@ echo.> app\data\germany-energy-clean.csv
 echo.> app\controllers\energy_controller.py
 echo.> app\models\energy_model.py
 echo.> app\services\forecast_service.py
+echo.> app\services\prophet_service.py
+echo.> app\services\random_forest_service.py
+echo.> app\services\xgboost_service.py
 echo.> app\schemas\energy_schema.py
 echo.> app\utils\helpers.py
 echo.> run.py
+echo.> train_models.py
 echo.> requirements.txt
 
 echo Project structure created successfully!

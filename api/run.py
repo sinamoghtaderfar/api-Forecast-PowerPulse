@@ -1,20 +1,12 @@
 # run.py
-from app.services.forecast_service import ProphetForecastService, RandomForestForecastService, XGBoostForecastService
-def main():
-    prophet_service = ProphetForecastService(data_path="app/data/germany-energy-clean.csv")
-    random_service = RandomForestForecastService(data_path="app/data/germany-energy-clean.csv")
-    xGBoost_service = XGBoostForecastService(data_path="app/data/germany-energy-clean.csv")
-    
-    prophet_service.load_data()
-    random_service.load_data()
-    xGBoost_service.load_data()
-    
-    prophet_forecast_json = prophet_service.train_and_forecast(years_ahead=10)
-    random_forecast_service = random_service.train_and_forecast(years_ahead=10)
-    xGBoost_forecast_service = xGBoost_service.train_and_forecast(years_ahead=10)
-    
+from fastapi import FastAPI
+from app.controllers.energy_controller import router as energy_router
 
-    
+app = FastAPI(title="Germany Energy Forecast API")
+
+# Include controller routes
+app.include_router(energy_router)
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
