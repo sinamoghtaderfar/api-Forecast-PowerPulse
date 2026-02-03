@@ -1,6 +1,6 @@
 import pandas as pd
 from prophet import Prophet
-
+import numpy as np
 
 
 class ProphetForecastService:
@@ -8,55 +8,79 @@ class ProphetForecastService:
         self.data_path = data_path
         self.df = None
         self.model = None
+        self.last_year = None
+        self.last_values = None  
 
     def load_data(self):
-        # load Data 
         self.df = pd.read_csv(self.data_path)
-        self.df['ds'] = pd.to_datetime(self.df['year'], format='%Y')
+        
+        self.df['ds'] = pd.to_datetime(self.df['year'].astype(str) + '-01-01')
         self.df = self.df.rename(columns={'electricity_generation': 'y'})
-        print("Data loaded successfully")
+        
+        self.last_year = int(self.df['year'].max())
+        self.last_values = self.df.iloc[-1][['population', 'gdp', 'renewables_share_energy']].to_dict()
+        
+        print("Prophet data loaded")
         print(f"Shape: {self.df.shape}")
-        print(f"Columns: {self.df.columns.tolist()}")
-        print("\nFirst 5 rows:")
-        print(self.df.head())
+        print(f"Last year: {self.last_year}")
+        print(f"Last regressors: {self.last_values}")
 
-    def train_and_forecast(self, years_ahead=10):
+    def train_model(self):
         if self.df is None:
-            raise ValueError("Data not loaded! Call load_data() first.")
-        # add variable Prophet
-        self.model = Prophet()
+            self.load_data()
+
+        if self.model is not None:
+            print("Prophet model already trained")
+            return
+
+        print("Training Prophet model...")
+        self.model = Prophet(
+            yearly_seasonality=False,   
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            growth='linear'
+        )
+        
         self.model.add_regressor('population')
         self.model.add_regressor('gdp')
         self.model.add_regressor('renewables_share_energy')
 
-        self.model.fit(self.df)
+        self.model.fit(self.df[['ds', 'y', 'population', 'gdp', 'renewables_share_energy']])
+        print("Prophet model trained successfully")
 
-        # future dataframe
-        future = self.model.make_future_dataframe(periods=years_ahead, freq='YE')
+    def forecast(self, years_ahead=10):
+        if self.model is None:
+            raise RuntimeError("Prophet model is not trained yet. Call train_model() first.")
+        if self.df is None:
+            self.load_data()
 
-        last_row = self.df.iloc[-1]
+        future_dates = pd.date_range(
+            start=pd.Timestamp(f"{self.last_year + 1}-01-01"),
+            periods=years_ahead,
+            freq='YS'  
+        )
+        
+        future = pd.DataFrame({'ds': future_dates})
 
-        future['population'] = last_row['population'] * (1 + 0.01) ** (future.index - self.df.index[-1])
-        future['gdp'] = last_row['gdp'] * (1 + 0.02) ** (future.index - self.df.index[-1])
-        future['renewables_share_energy'] = last_row['renewables_share_energy'] * (1 + 0.05) ** (future.index - self.df.index[-1])
+        years_from_last = np.arange(1, years_ahead + 1)
+        
+        future['population'] = self.last_values['population'] * (1 + 0.01) ** years_from_last
+        future['gdp']        = self.last_values['gdp']        * (1 + 0.02) ** years_from_last
+        future['renewables_share_energy'] = self.last_values['renewables_share_energy'] * (1 + 0.05) ** years_from_last
 
         forecast = self.model.predict(future)
-
-        print("\nProphet Forecast Result:")
-        print(forecast[['ds','yhat','yhat_lower','yhat_upper']].tail(years_ahead))
 
         forecast_json = []
         for _, row in forecast.iterrows():
             forecast_json.append({
-                "year": row['ds'].year,
-                "forecast": row['yhat'],
-                "lower": row['yhat_lower'],
-                "upper": row['yhat_upper']
+                "year": int(row['ds'].year),
+                "forecast": float(row['yhat']),
+                "lower": float(row['yhat_lower']),
+                "upper": float(row['yhat_upper'])
             })
 
-        #print("\nForecast Result JSON:")
-        #print(forecast_json)
-        print("\nProphet Forecast JSON Output:")
+        print(f"\nProphet forecast for {years_ahead} years ahead:")
         for item in forecast_json:
-            print(f"{item}")
+            print(item)
+
         return forecast_json

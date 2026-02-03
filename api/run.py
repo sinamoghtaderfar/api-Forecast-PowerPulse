@@ -1,22 +1,19 @@
 # run.py
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.controllers.energy_controller import router as energy_router
+"""
+اجرای سرور FastAPI پروژه
+استفاده: python run.py
+"""
 
-app = FastAPI(title="Germany Energy Forecast API")
-
-# CORS config (for React)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include API routes
-app.include_router(energy_router)
+import uvicorn
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    print("Starting FastAPI server...")
+    uvicorn.run(
+        app="app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,                    # در توسعه فعال باشه
+        log_level="info",
+        # workers=2,                    # برای production فعال کن (کامنت شده)
+        # timeout_keep_alive=65,        # اگر نیاز به تنظیم timeout داری
+    )
