@@ -1,15 +1,17 @@
-import { useState } from 'react'
-
-import './App.css'
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Forecast from "./pages/Forecast";
+//import Dashboard from "./pages/Dashboard";
+import "./App.css";
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <div>sina</div>
-    </>
-  )
+    <BrowserRouter>
+      <Routes>
+        {/* <Route path="/" element={<Dashboard />} /> */}
+        <Route path="/forecast" element={<Forecast />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
-export default App
+export default App;
