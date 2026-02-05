@@ -1,4 +1,4 @@
-// src/components/XGBoostChart.jsx
+// src/components/RandomForestChart.jsx
 import React from "react";
 import {
   LineChart,
@@ -11,8 +11,7 @@ import {
   ResponsiveContainer
 } from "recharts";
 
-export default function XGBoostChart({ data }) {
-  // data = [{ year: 2026, forecast: 504, lower: 483, upper: 523 }, ...]
+export default function RandomForestChart({ data }) {
   const chartData = data.map(item => ({
     date: item.year,
     value: item.forecast,
@@ -29,7 +28,7 @@ export default function XGBoostChart({ data }) {
         <Tooltip />
         <Legend />
         <Line type="monotone" dataKey="lower" name="Lower Bound" stroke="#ef4444" dot={false} />
-        <Line type="monotone" dataKey="value" name="XGBoost Forecast" stroke="#f97316" dot={{ r: 3 }} activeDot={{ r: 6 }} />
+        <Line type="monotone" dataKey="value" name="Random Forest Forecast" stroke="#f97316" dot={{ r: 3 }} activeDot={{ r: 6 }} />
         <Line type="monotone" dataKey="upper" name="Upper Bound" stroke="#3b82f6" dot={false} />
       </LineChart>
     </ResponsiveContainer>

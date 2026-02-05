@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { getAllForecasts } from "../api/energyApi";
-import { Box, Typography } from "@mui/material";
+import { Box, Typography, CircularProgress, Alert } from "@mui/material";
 import ProphetChart from "../components/Prophet Forecast/ProphetChart";
 import ProphetTable from "../components/Prophet Forecast/ProphetTable";
+
 
 function Forecast() {
   const [data, setData] = useState({ prophet: [], random_forest: [], xgboost: [] });
@@ -23,8 +24,20 @@ function Forecast() {
     fetchData();
   }, []);
 
-  if (loading) return <p>Loading forecasts...</p>;
-  if (error) return <p>Error: {error}</p>;
+
+  if (loading)
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+        <CircularProgress />
+      </Box>
+    );
+
+  if (error)
+    return (
+      <Box sx={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "50vh" }}>
+        <Alert severity="error">Error: {error}</Alert>
+      </Box>
+    );
 
   const prophetChartData = data.prophet?.map(item => ({
     year: item?.year ?? 0,
@@ -33,24 +46,24 @@ function Forecast() {
     upper: item?.upper ?? null
   })) ?? [];
 
-  
-const prophetTableData = data.prophet?.map(item => ({
-  date: String(item.year),
-  value: Number(item.forecast?.toFixed(1)) || null,
-  lower: Number(item.lower?.toFixed(1))   || null,
-  upper: Number(item.upper?.toFixed(1))   || null
-})) ?? [];
+
+  const prophetTableData = data.prophet?.map(item => ({
+    date: String(item.year),
+    value: Number(item.forecast?.toFixed(1)) || null,
+    lower: Number(item.lower?.toFixed(1)) || null,
+    upper: Number(item.upper?.toFixed(1)) || null
+  })) ?? [];
 
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h4" sx={{ mb: 2 }}>Prophet Forecast</Typography>
 
-      
-      <ProphetChart data={prophetChartData} />  
 
-      {/* جدول Prophet */}
+      <ProphetChart data={prophetChartData} />
+
+      {/* Chart Prophet */}
       <Typography variant="h5" sx={{ mt: 4, mb: 2 }}>Prophet Forecast Table</Typography>
-      <ProphetTable data={prophetTableData} />  
+      <ProphetTable data={prophetTableData} />
     </Box>
   );
 }

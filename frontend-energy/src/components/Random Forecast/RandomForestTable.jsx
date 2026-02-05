@@ -1,8 +1,8 @@
-// src/components/XGBoostTable.jsx
+// src/components/RandomForestTable.jsx
 import * as React from "react";
 import { DataGrid } from "@mui/x-data-grid";
 
-export default function XGBoostTable({ data }) {
+export default function RandomForestTable({ data }) {
   const rows = data.map((item, index) => ({
     id: index,
     date: item.year,

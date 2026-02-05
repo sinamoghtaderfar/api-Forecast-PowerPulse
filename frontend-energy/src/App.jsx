@@ -3,7 +3,9 @@ import { Toolbar } from '@mui/material';
 
 import MyNavbar from "./components/MyNavbar";
 import Homepage from "./pages/Home";
-import Forecast from "./pages/Forecast";
+import ForecastProphet from "./pages/ForecastProphet";
+import ForecastXGBoost from "./pages/ForecastXGBoost";
+import ForecastRandom from "./pages/ForecastRandom";
 import Footer from "./components/Footer";
 
 function App() {
@@ -11,12 +13,13 @@ function App() {
     <BrowserRouter>
       <div className="App">
         <MyNavbar />
-        <Toolbar />
 
         <div className="AppMain">
           <Routes>
             <Route path="/" element={<Homepage />} />
-            <Route path="/forecast" element={<Forecast />} />
+            <Route path="/ForecastProphet" element={<ForecastProphet />} />
+            <Route path="/forecastxGBoost" element={<ForecastXGBoost />} />
+            <Route path="/forecastRandom" element={<ForecastRandom />} />
           </Routes>
         </div>
 
