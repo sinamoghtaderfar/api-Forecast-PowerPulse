@@ -1,14 +1,10 @@
-// src/api/energyApi.js
-const API_BASE = "";
+const API_BASE = ""; 
 
 export async function getAllForecasts(yearsAhead = 10) {
-  const res = await fetch(`${API_BASE}forecast/all?years_ahead=${yearsAhead}`);
-
+  const res = await fetch(`${API_BASE}/forecast/all?years_ahead=${yearsAhead}`);
   if (!res.ok) {
     throw new Error("Failed to fetch forecasts");
   }
-  //   const data = await res.json(); // فقط یک بار body را بخوان
-  // console.log(data);  
   return await res.json();
 }
 

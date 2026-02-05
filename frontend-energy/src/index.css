@@ -6,3 +6,19 @@
 body {
   margin: 0;
 }
+
+/* index.css یا global CSS */
+#root, html, body {
+  height: 100%;
+  margin: 0;
+}
+
+.App {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.AppMain {
+  flex: 1; 
+}

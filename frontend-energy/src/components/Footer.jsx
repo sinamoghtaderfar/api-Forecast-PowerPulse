@@ -9,7 +9,7 @@ export default function Footer() {
       <Box sx={{ mt: 2 }}>
         <Link to="/about" style={{ margin: "0 10px", color: "#f97316" }}>About</Link>
         <Link to="/contact" style={{ margin: "0 10px", color: "#f97316" }}>Contact</Link>
-        <a href="https://github.com/" target="_blank" rel="noreferrer" style={{ margin: "0 10px", color: "#f97316" }}>GitHub</a>
+        <a href="https://github.com/sinamoghtaderfar" target="_blank" rel="noreferrer" style={{ margin: "0 10px", color: "#f97316" }}>GitHub</a>
       </Box>
     </Box>
   );

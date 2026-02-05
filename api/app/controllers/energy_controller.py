@@ -25,7 +25,7 @@ async def get_combined_forecast(years_ahead: int = 10) -> Dict[str, List[Dict]]:
     xgb_preds = xgboost_service.forecast(years_ahead)
 
     if len(prophet_preds) != years_ahead or len(rf_preds) != years_ahead or len(xgb_preds) != years_ahead:
-        raise ValueError("تعداد پیش‌بینی‌های مدل‌ها با years_ahead مطابقت ندارد")
+        raise ValueError("years_ahead")
 
     combined = []
     for i in range(years_ahead):

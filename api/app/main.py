@@ -27,7 +27,7 @@ xgboost_service = XGBoostForecastService("app/data/germany-energy-clean.csv")
 
 @app.on_event("startup")
 async def startup_event():
-    print("=== شروع فرآیند startup ===")
+  
     
     try:
         # Prophet
