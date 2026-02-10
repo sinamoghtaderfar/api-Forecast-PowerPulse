@@ -21,30 +21,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-prophet_service = ProphetForecastService("app/data/germany-energy-clean.csv")
-random_forest_service = RandomForestForecastService("app/data/germany-energy-clean.csv")
-xgboost_service = XGBoostForecastService("app/data/germany-energy-clean.csv")
+
+prophet_service = ProphetForecastService()
+random_forest_service = RandomForestForecastService()
+xgboost_service = XGBoostForecastService()
 
 @app.on_event("startup")
 async def startup_event():
-  
+    print("Starting up Energy Forecast API...")
     
     try:
         # Prophet
+        print("Loading Prophet data...")
         prophet_service.load_data()
-        prophet_service.train_model()          
+        prophet_service.train_model()
+        print("Prophet model ready")
 
         # Random Forest
+        print("Loading Random Forest data...")
         random_forest_service.load_data()
         random_forest_service.train_model()
+        print("Random Forest model ready")
 
         # XGBoost
+        print("⚡ Loading XGBoost data...")
         xgboost_service.load_data()
         xgboost_service.train_model()
+        print(" XGBoost model ready")
 
-    
+        print(" All models loaded and ready for predictions!")
+
     except Exception as e:
-        print(f"{e}")
-        
+        print(f" Error during startup: {e}")
+        raise
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Germany Energy Forecast API",
+        "status": "running",
+        "models": ["prophet", "random_forest", "xgboost"],
+        "endpoints": {
+            "prophet": "/forecast/prophet",
+            "random_forest": "/forecast/random-forest", 
+            "xgboost": "/forecast/xgboost",
+            "all_models": "/forecast/all"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "models_loaded": True,
+        "api_version": "1.0.0"
+    }
 
 app.include_router(energy_router, prefix="/forecast")
