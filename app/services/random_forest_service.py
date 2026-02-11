@@ -1,3 +1,4 @@
+
 """
 RandomForestForecastService module.
 
@@ -17,7 +18,11 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
 import warnings
-
+import os
+import joblib
+import hashlib
+from pathlib import Path
+from functools import lru_cache
 warnings.filterwarnings("ignore")
 
 
@@ -45,6 +50,14 @@ class RandomForestForecastService:
         self.feature_names = None
         self.avg_growth_rates = {}
         self.cv_scores = []
+        models_dir = Path(__file__).resolve().parent.parent / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.model_path = models_dir / "random_forest_model.joblib"
+
+    def compute_data_hash(self):
+        with open(self.data_path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
 
     def load_data(self):
         """
@@ -180,7 +193,7 @@ class RandomForestForecastService:
         if self.df is None:
             self.load_data()
 
-        # Feature list
+        # Set feature list (always after load_data)
         feature_cols = [
             # Time features
             "year",
@@ -219,15 +232,26 @@ class RandomForestForecastService:
             "renewables_impact",
         ]
 
-        available_features = [col for col in feature_cols if col in self.df.columns]
-        self.feature_names = available_features
+        self.feature_names = [col for col in feature_cols if col in self.df.columns]
 
-        print(f"Training with {len(available_features)} features")
-        print(f"Features: {available_features}")
+        print(f"Training with {len(self.feature_names)} features")
+        print(f"Features: {self.feature_names}")
+
+        current_hash = self.compute_data_hash()
+
+        if os.path.exists(self.model_path):
+            try:
+                saved = joblib.load(self.model_path)
+                if saved['data_hash'] == current_hash:
+                    self.model = saved['model']
+                    print("Loaded saved Random Forest model")
+                    return
+            except Exception as e:
+                print(f"Error loading saved Random Forest model: {e}")
 
         # Prepare training data
-        train_df = self.df.dropna(subset=available_features + ["y"])
-        X = train_df[available_features]
+        train_df = self.df.dropna(subset=self.feature_names + ["y"])
+        X = train_df[self.feature_names]
         y = train_df["y"]
 
         print(f"Training samples: {len(X)}")
@@ -275,7 +299,7 @@ class RandomForestForecastService:
         # Feature importance
         importance = pd.DataFrame(
             {
-                "feature": available_features,
+                "feature": self.feature_names,
                 "importance": self.model.feature_importances_,
             }
         ).sort_values("importance", ascending=False)
@@ -293,6 +317,14 @@ class RandomForestForecastService:
         print(f"  MAE: {train_mae:,.0f}")
         print(f"  MAPE: {train_mape:.1f}%")
 
+        # Save the model
+        to_save = {
+            'model': self.model,
+            'data_hash': current_hash
+        }
+        joblib.dump(to_save, self.model_path)
+        print("Saved trained Random Forest model")
+    @lru_cache(maxsize=32)
     def forecast(self, years_ahead=10):
         """
         Generate multi-year forecasts using the trained Random Forest model.

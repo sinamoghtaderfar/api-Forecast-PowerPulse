@@ -77,4 +77,3 @@ async def get_all_forecasts(years_ahead: int = 10) -> Dict[str, Any]:
         raise HTTPException(
             status_code=500, detail=f"Error getting forecasts: {str(e)}"
         )
-

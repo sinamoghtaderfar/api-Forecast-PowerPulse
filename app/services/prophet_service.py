@@ -11,8 +11,13 @@ It supports additional regressors: population, GDP, and renewables_share_energy.
 import pandas as pd
 import numpy as np
 from prophet import Prophet
+from prophet.serialize import model_to_json, model_from_json
 import warnings
-
+import os
+import json
+import hashlib
+from pathlib import Path
+from functools import lru_cache
 warnings.filterwarnings("ignore")
 
 
@@ -40,6 +45,14 @@ class ProphetForecastService:
         self.model = None
         self.last_year = None
         self.last_values = None
+        models_dir = Path(__file__).resolve().parent.parent / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        self.model_path = models_dir / "prophet_model.json"
+
+    def compute_data_hash(self):
+        with open(self.data_path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
 
     def load_data(self):
         """
@@ -95,6 +108,21 @@ class ProphetForecastService:
         if self.df is None:
             self.load_data()
 
+        current_hash = self.compute_data_hash()
+        print(f"Model path being used: {self.model_path}")
+        print(f"Exists? {os.path.exists(self.model_path)}")
+        if os.path.exists(self.model_path):
+            print(f"File size: {os.path.getsize(self.model_path)} bytes")
+            try:
+                with open(self.model_path, 'r') as f:
+                    saved = json.load(f)
+                if saved['data_hash'] == current_hash:
+                    self.model = model_from_json(saved['model_json'])
+                    print("Loaded saved Prophet model")
+                    return
+            except Exception as e:
+                print(f"Error loading saved Prophet model: {e}")
+
         self.model = Prophet(
             yearly_seasonality=False,
             weekly_seasonality=False,
@@ -111,6 +139,15 @@ class ProphetForecastService:
         self.model.fit(train_df)
         print("Prophet model trained")
 
+        # Save the model
+        to_save = {
+            'model_json': model_to_json(self.model),
+            'data_hash': current_hash
+        }
+        with open(self.model_path, 'w') as f:
+            json.dump(to_save, f)
+        print("Saved trained Prophet model")
+    @lru_cache(maxsize=32)
     def forecast(self, years_ahead=10):
         """
         Generate multi-year forecasts using the trained Prophet model.

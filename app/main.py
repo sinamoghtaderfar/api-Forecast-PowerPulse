@@ -1,3 +1,6 @@
+
+
+
 """
 Main application file for the Germany Energy Forecast API.
 
@@ -62,7 +65,7 @@ async def startup_event():
         print("Random Forest model ready")
 
         # XGBoost
-        print("⚡ Loading XGBoost data...")
+        print(" Loading XGBoost data...")
         xgboost_service.load_data()
         xgboost_service.train_model()
         print(" XGBoost model ready")

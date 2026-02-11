@@ -1,3 +1,4 @@
+
 """
 XGBoostForecastService module.
 
@@ -14,7 +15,11 @@ import pandas as pd
 import numpy as np
 from xgboost import XGBRegressor
 import warnings
-
+import os
+import joblib
+import hashlib
+from pathlib import Path
+from functools import lru_cache
 warnings.filterwarnings("ignore")
 
 
@@ -46,6 +51,14 @@ class XGBoostForecastService:
         self.last_year = None
         self.feature_names = None
         self.avg_growth_rates = {}  # store average historical growth rates
+        models_dir = Path(__file__).resolve().parent.parent / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.model_path = models_dir / "xgboost_model.joblib"
+
+    def compute_data_hash(self):
+        with open(self.data_path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
 
     def load_data(self):
         """
@@ -156,7 +169,7 @@ class XGBoostForecastService:
         if self.df is None:
             self.load_data()
 
-        # Improved feature set
+        # Set feature list (always after load_data)
         feature_cols = [
             "year",
             "population",
@@ -179,16 +192,27 @@ class XGBoostForecastService:
             "energy_intensity",
         ]
 
-        available_features = [col for col in feature_cols if col in self.df.columns]
-        self.feature_names = available_features
+        self.feature_names = [col for col in feature_cols if col in self.df.columns]
 
-        print(f"Training with {len(available_features)} features: {available_features}")
+        print(f"Training with {len(self.feature_names)} features: {self.feature_names}")
+
+        current_hash = self.compute_data_hash()
+
+        if os.path.exists(self.model_path):
+            try:
+                saved = joblib.load(self.model_path)
+                if saved['data_hash'] == current_hash:
+                    self.model = saved['model']
+                    print("Loaded saved XGBoost model")
+                    return
+            except Exception as e:
+                print(f"Error loading saved XGBoost model: {e}")
 
         # Prepare training data
-        train_df = self.df.dropna(subset=available_features + ["y"])
+        train_df = self.df.dropna(subset=self.feature_names + ["y"])
 
         # Target: next year's value (y_t+1)
-        X = train_df[available_features].iloc[:-1]
+        X = train_df[self.feature_names].iloc[:-1]
         y = self.df["y"].iloc[1:]
         y = y.iloc[: len(X)]
 
@@ -224,7 +248,7 @@ class XGBoostForecastService:
         # Feature importance
         importance = pd.DataFrame(
             {
-                "feature": available_features,
+                "feature": self.feature_names,
                 "importance": self.model.feature_importances_,
             }
         ).sort_values("importance", ascending=False)
@@ -232,6 +256,14 @@ class XGBoostForecastService:
         print("\nTop 5 important features:")
         print(importance.head().to_string())
 
+        # Save the model
+        to_save = {
+            'model': self.model,
+            'data_hash': current_hash
+        }
+        joblib.dump(to_save, self.model_path)
+        print("Saved trained XGBoost model")
+    @lru_cache(maxsize=32)
     def forecast(self, years_ahead=10):
         if self.model is None:
             self.train_model()
