@@ -20,7 +20,7 @@ The first API request triggers model training and takes approximately **4–7 se
 ## Data
 
 The system uses electricity consumption and related economic data for Germany from **1985 to 2025**, sourced from the  
-[Our World in Data – Energy Dataset](https://ourworldindata.org/energy).
+[Energy Dataset](https://github.com/owid/energy-data).
 
 ### Input Features
 
