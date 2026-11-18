@@ -1,433 +1,142 @@
-
 """
 XGBoostForecastService module.
 
-This module defines the XGBoostForecastService class, which is responsible
-for loading Germany energy data, training an XGBoost regression model, and
-generating multi-year energy forecasts with uncertainty estimation.
-
-The class uses advanced features such as lag features, rolling statistics,
-interaction features, and Monte Carlo simulations to provide robust
-forecasts.
+Trains an XGBoost regression model on lag, rolling, time and economic features
+of Germany energy data, and generates recursive multi-year forecasts with
+Monte Carlo uncertainty estimation over exogenous growth scenarios.
 """
 
-import pandas as pd
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 import numpy as np
+import pandas as pd
+import xgboost
 from xgboost import XGBRegressor
-import warnings
-import os
-import joblib
-import hashlib
-from pathlib import Path
-from functools import lru_cache
-warnings.filterwarnings("ignore")
+
+from app.services.base import BaseForecastService, ForecastRows, growth_pct
+from app.services.features import (
+    build_training_frame,
+    compute_features,
+    project_exogenous,
+)
+
+logger = logging.getLogger(__name__)
+
+FEATURE_COLUMNS = [
+    "year",
+    "population",
+    "gdp",
+    "renewables_share_energy",
+    "y_lag1",
+    "y_lag2",
+    "y_lag3",
+    "y_diff1",
+    "y_rolling_mean_3",
+    "y_rolling_std_3",
+    "y_rolling_mean_5",
+    "y_rolling_std_5",
+    "gdp_growth_feature",
+    "population_growth_feature",
+    "renewables_growth_feature",
+    "year_index",
+    "year_squared",
+    "gdp_per_capita",
+    "energy_intensity",
+]
+
+RANDOM_STATE = 42
+N_SIMULATIONS = 100
+GROWTH_FACTOR_RANGE = (0.95, 1.05)
 
 
-class XGBoostForecastService:
-    """
-    XGBoost-based forecasting service for Germany energy data.
+class XGBoostForecastService(BaseForecastService):
+    """XGBoost-based forecasting service for Germany energy data."""
 
-    Attributes:
-        data_path (str): Path to the CSV data file.
-        df (pd.DataFrame): Loaded dataset with features.
-        model (XGBRegressor): Trained XGBoost regression model.
-        last_row (pd.Series): Last row of the dataset.
-        last_year (int): Last year in the dataset.
-        feature_names (list): Names of features used for training.
-        avg_growth_rates (dict): Average historical growth rates for features.
-    """
-    
-    def __init__(self, data_path="app/data/germany-energy-clean.csv"):
-        """
-        Initialize the XGBoostForecastService.
+    model_name = "XGBoost"
+    model_filename = "xgboost_model.joblib"
+    model_version = "2"
 
-        Args:
-            data_path (str): Path to the CSV file containing historical energy data.
-        """
-        self.data_path = data_path
-        self.df = None
-        self.model = None
-        self.last_row = None
-        self.last_year = None
-        self.feature_names = None
-        self.avg_growth_rates = {}  # store average historical growth rates
-        models_dir = Path(__file__).resolve().parent.parent / "models"
-        models_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.model_path = models_dir / "xgboost_model.joblib"
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.feature_names: list[str] = list(FEATURE_COLUMNS)
 
-    def compute_data_hash(self):
-        with open(self.data_path, 'rb') as f:
-            return hashlib.md5(f.read()).hexdigest()
+    def _library_versions(self) -> list[str]:
+        return [f"xgboost={xgboost.__version__}"]
 
-    def load_data(self):
-        """
-        Load and preprocess the historical energy dataset.
-
-        This method:
-        - Loads CSV data into a pandas DataFrame.
-        - Validates required columns.
-        - Converts columns to numeric.
-        - Fills missing values and renames the target column.
-        - Calculates average historical growth rates.
-        - Creates lag features, rolling statistics, and interaction features.
-        - Stores the last row and year for future forecasts.
-
-        Raises:
-            Exception: If data loading or processing fails.
-        """
-        
-        try:
-            self.df = pd.read_csv(self.data_path)
-            required = [
-                "year",
-                "electricity_generation",
-                "population",
-                "gdp",
-                "renewables_share_energy",
-            ]
-            for col in required:
-                if col not in self.df.columns:
-                    raise ValueError(f"Missing column: {col}")
-
-            for col in required:
-                self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
-
-            self.df = self.df.ffill()
-            self.df = self.df.rename(columns={"electricity_generation": "y"})
-
-            # Calculate average historical growth rates
-            self.avg_growth_rates = {
-                "y_growth": self.df["y"].pct_change().mean(),
-                "gdp_growth": self.df["gdp"].pct_change().mean(),
-                "population_growth": self.df["population"].pct_change().mean(),
-                "renewables_growth": self.df["renewables_share_energy"]
-                .pct_change()
-                .mean(),
-            }
-
-            print(f"Average growth rates: {self.avg_growth_rates}")
-
-            # Enhanced features – using average growth rates
-            for lag in [1, 2, 3]:
-                self.df[f"y_lag{lag}"] = self.df["y"].shift(lag)
-
-            self.df["y_diff1"] = self.df["y"].diff()
-
-            # Use average historical growth instead of last observed growth
-            self.df["gdp_growth_feature"] = self.avg_growth_rates["gdp_growth"]
-            self.df["population_growth_feature"] = self.avg_growth_rates[
-                "population_growth"
-            ]
-            self.df["renewables_growth_feature"] = self.avg_growth_rates[
-                "renewables_growth"
-            ]
-
-            # Rolling statistics
-            for window in [3, 5]:
-                self.df[f"y_rolling_mean_{window}"] = (
-                    self.df["y"].shift(1).rolling(window=window, min_periods=1).mean()
-                )
-                self.df[f"y_rolling_std_{window}"] = (
-                    self.df["y"].shift(1).rolling(window=window, min_periods=1).std()
-                )
-
-            # Time-based features
-            self.df["year_index"] = self.df["year"] - self.df["year"].min()
-            self.df["year_squared"] = self.df["year_index"] ** 2
-
-            # Interaction features
-            self.df["gdp_per_capita"] = self.df["gdp"] / self.df["population"]
-            self.df["energy_intensity"] = self.df["y"] / self.df["gdp"]
-
-            self.df = self.df.ffill().bfill()
-            self.last_row = self.df.iloc[-1]
-            self.last_year = int(self.last_row["year"])
-
-            print(f"XGBoost data loaded. Last year: {self.last_year}")
-            print(f"Last y value: {self.last_row['y']:,.0f}")
-
-        except Exception as e:
-            print(f"Error loading XGBoost data: {e}")
-            raise
-
-    def train_model(self):
-        """
-        Generate a multi-year forecast using the trained XGBoost model.
-
-        Uses Monte Carlo simulations with random noise to estimate prediction
-        uncertainty. Returns a list of dictionaries containing yearly forecasts,
-        lower and upper confidence bounds, and percentage growth from the previous year.
-
-        Args:
-            years_ahead (int): Number of future years to forecast.
-
-        Returns:
-            list[dict]: Forecast data for each year with 'year', 'forecast',
-                        'lower', 'upper', and 'growth_from_previous'.
-        """
-        if self.df is None:
-            self.load_data()
-
-        # Set feature list (always after load_data)
-        feature_cols = [
-            "year",
-            "population",
-            "gdp",
-            "renewables_share_energy",
-            "y_lag1",
-            "y_lag2",
-            "y_lag3",
-            "y_diff1",
-            "y_rolling_mean_3",
-            "y_rolling_std_3",
-            "y_rolling_mean_5",
-            "y_rolling_std_5",
-            "gdp_growth_feature",
-            "population_growth_feature",
-            "renewables_growth_feature",
-            "year_index",
-            "year_squared",
-            "gdp_per_capita",
-            "energy_intensity",
-        ]
-
-        self.feature_names = [col for col in feature_cols if col in self.df.columns]
-
-        print(f"Training with {len(self.feature_names)} features: {self.feature_names}")
-
-        current_hash = self.compute_data_hash()
-
-        if os.path.exists(self.model_path):
-            try:
-                saved = joblib.load(self.model_path)
-                if saved['data_hash'] == current_hash:
-                    self.model = saved['model']
-                    print("Loaded saved XGBoost model")
-                    return
-            except Exception as e:
-                print(f"Error loading saved XGBoost model: {e}")
-
-        # Prepare training data
-        train_df = self.df.dropna(subset=self.feature_names + ["y"])
-
-        # Target: next year's value (y_t+1)
-        X = train_df[self.feature_names].iloc[:-1]
-        y = self.df["y"].iloc[1:]
-        y = y.iloc[: len(X)]
-
-        print(f"Training samples: {len(X)}, Target samples: {len(y)}")
-
-        # XGBoost model with tuned hyperparameters
-        self.model = XGBRegressor(
+    def _fit(self) -> None:
+        # Features of year t only use targets up to t-1, so this is a
+        # one-step-ahead model consistent with the recursive forecast.
+        X, y = build_training_frame(self.df, self.avg_growth_rates, self.feature_names)
+        logger.info("XGBoost training samples: %d", len(X))
+        model = XGBRegressor(
             n_estimators=150,
             learning_rate=0.05,
             max_depth=6,
             subsample=0.8,
             colsample_bytree=0.8,
-            random_state=42,
+            random_state=RANDOM_STATE,
             n_jobs=-1,
             objective="reg:squarederror",
             reg_alpha=0.1,
             reg_lambda=1.0,
             eval_metric="mae",
         )
+        model.fit(X, y)
+        self.model = model
 
-        # Train the model
-        self.model.fit(X, y)
+    def _predict(self, years_ahead: int) -> ForecastRows:
+        rng = np.random.default_rng(RANDOM_STATE)
+        factors = rng.uniform(*GROWTH_FACTOR_RANGE, size=(N_SIMULATIONS, 3))
 
-        # Evaluate model on training data
-        train_predictions = self.model.predict(X)
-        mae = np.mean(np.abs(train_predictions - y))
-        mape = np.mean(np.abs((train_predictions - y) / y)) * 100
+        history = np.tile(self.df["y"].to_numpy(dtype=float), (N_SIMULATIONS, 1))
+        year_min = int(self.df["year"].iloc[0])
+        last_y = float(self.last_row["y"])
+        prev_gdp = np.full(N_SIMULATIONS, float(self.last_row["gdp"]))
+        predictions = np.empty((N_SIMULATIONS, years_ahead))
 
-        print(f"XGBoost model trained")
-        print(f"Training MAE: {mae:,.0f}")
-        print(f"Training MAPE: {mape:.1f}%")
+        for step in range(1, years_ahead + 1):
+            exog = project_exogenous(
+                self.last_row, self.avg_growth_rates, step, factors
+            )
+            X: pd.DataFrame = compute_features(
+                history,
+                year=self.last_year + step,
+                year_min=year_min,
+                prev_gdp=prev_gdp,
+                growth_rates=self.avg_growth_rates,
+                **exog,
+            )[self.feature_names]
+            preds = np.maximum(self.model.predict(X), last_y * 0.5)
+            predictions[:, step - 1] = preds
+            history = np.column_stack([history, preds])
+            prev_gdp = exog["gdp"]
 
-        # Feature importance
-        importance = pd.DataFrame(
-            {
-                "feature": self.feature_names,
-                "importance": self.model.feature_importances_,
-            }
-        ).sort_values("importance", ascending=False)
+        mean = predictions.mean(axis=0)
+        std = predictions.std(axis=0)
+        lower = np.maximum(mean - 1.96 * std, 0)
+        upper = mean + 1.96 * std
 
-        print("\nTop 5 important features:")
-        print(importance.head().to_string())
-
-        # Save the model
-        to_save = {
-            'model': self.model,
-            'data_hash': current_hash
-        }
-        joblib.dump(to_save, self.model_path)
-        print("Saved trained XGBoost model")
-    @lru_cache(maxsize=32)
-    def forecast(self, years_ahead=10):
-        if self.model is None:
-            self.train_model()
-
-        print(f"\nGenerating {years_ahead}-year forecast with XGBoost...")
-
-        # Store predictions from multiple runs for uncertainty estimation
-        all_predictions = []
-
-        # Monte Carlo simulation
-        n_iterations = 100
-
-        for iteration in range(n_iterations):
-            if iteration % 20 == 0:
-                print(f"  Running iteration {iteration + 1}/{n_iterations}")
-
-            iteration_preds = []
-            temp_data = self.df.copy()
-
-            # Add random noise to growth rates
-            pop_factor = np.random.uniform(0.95, 1.05)
-            gdp_factor = np.random.uniform(0.95, 1.05)
-            renew_factor = np.random.uniform(0.95, 1.05)
-
-            for i in range(1, years_ahead + 1):
-                target_year = self.last_year + i
-
-                # Compute future auxiliary variables with realistic growth
-                pop = (
-                    self.last_row["population"]
-                    * (1 + self.avg_growth_rates["population_growth"] * pop_factor) ** i
-                )
-                gdp = (
-                    self.last_row["gdp"]
-                    * (1 + self.avg_growth_rates["gdp_growth"] * gdp_factor) ** i
-                )
-                renew = (
-                    self.last_row["renewables_share_energy"]
-                    * (1 + self.avg_growth_rates["renewables_growth"] * renew_factor)
-                    ** i
-                )
-                renew = min(renew, 100.0)
-
-                # Create future row
-                future_row = pd.DataFrame(
-                    {
-                        "year": [target_year],
-                        "population": [pop],
-                        "gdp": [gdp],
-                        "renewables_share_energy": [renew],
-                        "y": [np.nan],
-                    }
-                )
-
-                # Combine with historical data
-                temp_df = pd.concat([temp_data, future_row], ignore_index=True)
-
-                # Generate features for combined data
-                for lag in [1, 2, 3]:
-                    temp_df[f"y_lag{lag}"] = temp_df["y"].shift(lag)
-
-                temp_df["y_diff1"] = temp_df["y"].diff()
-
-                # Use average historical growth rates
-                temp_df["gdp_growth_feature"] = self.avg_growth_rates["gdp_growth"]
-                temp_df["population_growth_feature"] = self.avg_growth_rates[
-                    "population_growth"
-                ]
-                temp_df["renewables_growth_feature"] = self.avg_growth_rates[
-                    "renewables_growth"
-                ]
-
-                for window in [3, 5]:
-                    temp_df[f"y_rolling_mean_{window}"] = (
-                        temp_df["y"]
-                        .shift(1)
-                        .rolling(window=window, min_periods=1)
-                        .mean()
-                    )
-                    temp_df[f"y_rolling_std_{window}"] = (
-                        temp_df["y"]
-                        .shift(1)
-                        .rolling(window=window, min_periods=1)
-                        .std()
-                    )
-
-                temp_df["year_index"] = temp_df["year"] - temp_df["year"].min()
-                temp_df["year_squared"] = temp_df["year_index"] ** 2
-                temp_df["gdp_per_capita"] = temp_df["gdp"] / temp_df["population"]
-                temp_df["energy_intensity"] = temp_df["y"] / temp_df["gdp"]
-
-                temp_df = temp_df.ffill().bfill()
-
-                # Extract future features
-                future_features = temp_df.iloc[[-1]][self.feature_names]
-
-                # Prediction
-                pred = self.model.predict(future_features)[0]
-
-                # Ensure positive prediction
-                pred = max(pred, self.last_row["y"] * 0.5)
-
-                iteration_preds.append(pred)
-
-                # Update for next step
-                future_row["y"] = pred
-                temp_data = pd.concat([temp_data, future_row], ignore_index=True)
-
-            all_predictions.append(iteration_preds)
-
-        # Compute statistics
-        all_predictions = np.array(all_predictions)
-        mean_predictions = np.mean(all_predictions, axis=0)
-        std_predictions = np.std(all_predictions, axis=0)
-
-        # 95% confidence interval
-        lower_bounds = mean_predictions - 1.96 * std_predictions
-        upper_bounds = mean_predictions + 1.96 * std_predictions
-
-        # Ensure non-negative bounds
-        lower_bounds = np.maximum(lower_bounds, 0)
-
-        # Future years
-        forecast_years = np.arange(self.last_year + 1, self.last_year + 1 + years_ahead)
-
-        # Build JSON output
-        forecast_json = []
-        for i, (year, mean, lower, upper) in enumerate(
-            zip(forecast_years, mean_predictions, lower_bounds, upper_bounds)
-        ):
-            forecast_json.append(
+        rows = []
+        for i in range(years_ahead):
+            previous = last_y if i == 0 else mean[i - 1]
+            rows.append(
                 {
-                    "year": int(year),
-                    "forecast": float(mean),
-                    "lower": float(lower),
-                    "upper": float(upper),
-                    "growth_from_previous": float(
-                        (
-                            (
-                                mean / ( self.last_row["y"] if i == 0 else mean_predictions[i - 1]))- 1)* 100),
+                    "year": self.last_year + i + 1,
+                    "forecast": float(mean[i]),
+                    "lower": float(lower[i]),
+                    "upper": float(upper[i]),
+                    "growth_from_previous": growth_pct(mean[i], previous),
                 }
             )
+        return rows
 
-        total_growth = ((mean_predictions[-1] / mean_predictions[0]) - 1) * 100
-        avg_uncertainty = np.mean(upper_bounds - lower_bounds)
+    def _serialize(self) -> dict[str, Any]:
+        return {"model": self.model, "feature_names": self.feature_names}
 
-        print(f"\nXGBoost Forecast Summary:")
-        print(f"  First year ({forecast_years[0]}): {mean_predictions[0]:,.0f}")
-        print(f"  Last year ({forecast_years[-1]}): {mean_predictions[-1]:,.0f}")
-        print(f"  Total growth: {total_growth:.1f}%")
-        print(f"  Avg uncertainty width: {avg_uncertainty:,.0f}")
-
-        return forecast_json
-
-    def train_and_forecast(self, years_ahead=10):
-        """
-        Load data, train the model, and generate forecasts in a single step.
-
-        Args:
-            years_ahead (int): Number of future years to forecast.
-
-        Returns:
-            list[dict]: Forecast results for each year.
-        """
-        self.load_data()
-        self.train_model()
-        return self.forecast(years_ahead=years_ahead)
+    def _deserialize(self, payload: dict[str, Any]) -> None:
+        if payload.get("feature_names") != self.feature_names:
+            raise ValueError("Saved model was trained with different features")
+        self.model = payload["model"]

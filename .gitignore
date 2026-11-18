@@ -18,3 +18,8 @@ instance/
 # OS
 .DS_Store
 Thumbs.db
+.venv/
+.pytest_cache/
+
+# Trained model cache (regenerated automatically on startup)
+app/models/

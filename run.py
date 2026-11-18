@@ -1,20 +1,21 @@
 """
-This is the entry point for the FastAPI server of the PowerPulse project.
-It starts the server using Uvicorn, sets the host and port, and enables
-auto-reload for development purposes. Uncomment the workers and timeout
-options to adjust performance settings if needed.
+Entry point for the PowerPulse FastAPI server.
+
+Host, port and auto-reload can be overridden with the POWERPULSE_HOST,
+POWERPULSE_PORT and POWERPULSE_RELOAD environment variables.
 """
+
+import logging
+import os
 
 import uvicorn
 
 if __name__ == "__main__":
-    print("Starting FastAPI server...")
+    logging.basicConfig(level=logging.INFO)
     uvicorn.run(
         app="app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        host=os.getenv("POWERPULSE_HOST", "0.0.0.0"),
+        port=int(os.getenv("POWERPULSE_PORT", "8000")),
+        reload=os.getenv("POWERPULSE_RELOAD", "1") == "1",
         log_level="info",
-        # workers=2,
-        # timeout_keep_alive=65,
     )
