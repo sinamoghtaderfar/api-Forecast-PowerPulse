@@ -3,18 +3,21 @@ Main application file for the Germany Energy Forecast API.
 
 Initializes the FastAPI app, configures CORS, loads/trains the forecasting
 models (Prophet, Random Forest, XGBoost) on startup and registers the routes.
+A model that fails to load is reported as unavailable instead of preventing
+the API from starting.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app.config import get_settings
 from app.controllers.energy_controller import router as energy_router
 
 # Service instances are re-exported for backward compatibility.
@@ -24,42 +27,47 @@ from app.dependencies import (  # noqa: F401  # pylint: disable=unused-import
     random_forest_service,
     xgboost_service,
 )
+from app.schemas import HealthResponse
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
-
-
-def _cors_origins() -> list[str]:
-    raw = os.getenv("POWERPULSE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+API_VERSION = "1.1.0"
 
 
 def load_models() -> None:
-    """Load (or train) all forecasting models."""
+    """Load (or train) all forecasting models; failures are logged per model."""
     for service in SERVICES.values():
-        service.load_data()
-        service.train_model()
-        logger.info("%s model ready", service.model_name)
+        try:
+            service.load_data()
+            service.train_model()
+            logger.info("%s model ready", service.model_name)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("%s model failed to load", service.model_name)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Prepare all models before the API starts serving requests."""
-    if os.getenv("POWERPULSE_SKIP_STARTUP_TRAINING") != "1":
+    if not get_settings().skip_startup_training:
         load_models()
     yield
 
 
-app = FastAPI(title="Germany Energy Forecast API", lifespan=lifespan)
+app = FastAPI(
+    title="Germany Energy Forecast API", version=API_VERSION, lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=get_settings().cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+def _model_status() -> dict[str, bool]:
+    return {key: service.is_ready for key, service in SERVICES.items()}
 
 
 @app.get("/")
@@ -68,7 +76,8 @@ def root() -> dict[str, Any]:
     return {
         "message": "Germany Energy Forecast API",
         "status": "running",
-        "models": ["prophet", "random_forest", "xgboost"],
+        "target": "electricity_generation (TWh)",
+        "models": list(SERVICES),
         "endpoints": {
             "prophet": "/forecast/prophet",
             "random_forest": "/forecast/random-forest",
@@ -78,16 +87,33 @@ def root() -> dict[str, Any]:
     }
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health_check() -> dict[str, Any]:
-    """Report API status and whether all models are loaded."""
-    models = {key: service.is_ready for key, service in SERVICES.items()}
+    """Report API status and whether all models are loaded (always HTTP 200)."""
+    models = _model_status()
     return {
         "status": "healthy" if all(models.values()) else "degraded",
         "models_loaded": all(models.values()),
         "models": models,
-        "api_version": "1.0.0",
+        "api_version": API_VERSION,
     }
+
+
+@app.get("/health/live")
+def liveness() -> dict[str, str]:
+    """Liveness probe: the process is up and serving requests."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+def readiness() -> JSONResponse:
+    """Readiness probe: HTTP 200 only when every model is loaded, else 503."""
+    models = _model_status()
+    ready = all(models.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "models": models},
+    )
 
 
 app.include_router(energy_router, prefix="/forecast")
