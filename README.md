@@ -59,7 +59,8 @@ Running the API
 Start the API server locally:
 python run.py
 
-By default, the API will be available at http://localhost:5000.
+By default, the API will be available at http://localhost:8000.
+Host, port and auto-reload can be set via `POWERPULSE_HOST`, `POWERPULSE_PORT` and `POWERPULSE_RELOAD`; allowed CORS origins via `POWERPULSE_CORS_ORIGINS` (comma-separated).
 
 Note on First Request
 
@@ -68,7 +69,7 @@ The first request for a forecast will take longer, as the models need to train o
 Integrating with the Frontend
 
 Ensure the frontend is configured to use the backend API URL. For local development:
-http://localhost:5000
+http://localhost:8000
 
 Adjust for production deployment accordingly.
 
@@ -81,4 +82,8 @@ Start the API server (python run.py).
 Start the frontend (npm install and npm run dev).
 
 Test features with live backend data.
+
+Run the tests:
+pip install -r requirements-dev.txt
+python -m pytest
 
