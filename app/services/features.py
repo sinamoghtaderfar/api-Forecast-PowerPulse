@@ -1,18 +1,31 @@
 """
-Shared data loading and leakage-free feature engineering for the forecasting services.
+Shared data loading, exogenous projection and leakage-free feature engineering.
 
-Features for year ``t`` are computed only from target values strictly before ``t``
-plus the exogenous variables (population, GDP, renewables share) of year ``t``.
-The same function is used for training and for recursive multi-step forecasting,
-so both always see identically constructed features.
+Target: annual German ``electricity_generation`` in TWh (Our World in Data
+energy dataset). Exogenous variables: ``population`` (people), ``gdp``
+(OWID GDP, constant international-$) and ``renewables_share_energy``
+(% of primary energy).
+
+Rules that keep training, backtesting and production inference consistent:
+
+* Features of year ``t`` use target values strictly before ``t`` plus the
+  exogenous values of year ``t``.
+* Missing exogenous observations are carried forward from the last observed
+  value only (never backward-filled from the future).
+* Future exogenous values are projected with growth rates estimated from
+  observations available at the forecast origin.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 TARGET_COLUMN = "electricity_generation"
 EXOG_COLUMNS = ["population", "gdp", "renewables_share_energy"]
@@ -22,14 +35,21 @@ LAGS = (1, 2, 3, 4, 5)
 ROLLING_WINDOWS = (3, 5, 7)
 TREND_WINDOW = 5
 SEASONAL_PERIOD = 10
+MIN_HISTORY_ROWS = max(LAGS) + 3
+# Trailing window (years) for estimating exogenous growth at an origin.
+GROWTH_WINDOW_YEARS = 10
 
 
-def load_energy_data(data_path: str | Path) -> pd.DataFrame:
+def read_energy_csv(data_path: str | Path) -> pd.DataFrame:
     """
-    Load, validate and clean the historical dataset.
+    Read and validate the raw dataset without imputing anything.
 
-    Returns a frame sorted by year with columns ``year``, ``y`` (target) and the
-    exogenous columns, without missing values.
+    Returns a frame sorted by year with columns ``year``, ``y`` and the
+    exogenous columns. Missing or out-of-domain exogenous values are NaN.
+
+    Raises:
+        ValueError: missing columns, duplicate/non-consecutive years, or
+            missing/non-positive target values.
     """
     df = pd.read_csv(data_path)
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
@@ -37,32 +57,118 @@ def load_energy_data(data_path: str | Path) -> pd.DataFrame:
         raise ValueError(f"Missing column(s): {', '.join(missing)}")
 
     df = df[REQUIRED_COLUMNS].apply(pd.to_numeric, errors="coerce")
-    df = df.dropna(subset=["year", TARGET_COLUMN])
+    df = df.replace([np.inf, -np.inf], np.nan)
+    if df["year"].isna().any() or (df["year"] % 1 != 0).any():
+        raise ValueError("Column 'year' must contain integer years")
     df["year"] = df["year"].astype(int)
-    df = (
-        df.sort_values("year")
-        .drop_duplicates(subset="year", keep="last")
-        .reset_index(drop=True)
-    )
-    df[EXOG_COLUMNS] = df[EXOG_COLUMNS].ffill().bfill()
-    df = df.dropna().rename(columns={TARGET_COLUMN: "y"})
+    if df["year"].duplicated().any():
+        raise ValueError("Duplicate years in dataset")
+    df = df.sort_values("year").reset_index(drop=True)
+    if (df["year"].diff().dropna() != 1).any():
+        raise ValueError("Years must be consecutive (lag features assume annual steps)")
 
-    if len(df) < max(LAGS) + 3:
+    target = df[TARGET_COLUMN]
+    if target.isna().any() or (target <= 0).any():
+        raise ValueError(
+            f"'{TARGET_COLUMN}' must be present and positive for every year"
+        )
+
+    invalid = {
+        "population": df["population"] <= 0,
+        "gdp": df["gdp"] <= 0,
+        "renewables_share_energy": ~df["renewables_share_energy"].between(0, 100),
+    }
+    for col, mask in invalid.items():
+        mask = mask & df[col].notna()
+        if mask.any():
+            logger.warning("Ignoring %d out-of-range value(s) in '%s'", mask.sum(), col)
+            df.loc[mask, col] = np.nan
+
+    return df.rename(columns={TARGET_COLUMN: "y"})
+
+
+def prepare_history(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Impute exogenous gaps by carrying the last observation forward.
+
+    Leading rows without any prior exogenous observation are dropped instead
+    of being back-filled, so no value is taken from the future.
+    """
+    df = raw.copy()
+    df[EXOG_COLUMNS] = df[EXOG_COLUMNS].ffill()
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < MIN_HISTORY_ROWS:
         raise ValueError(
             f"Not enough usable rows in dataset ({len(df)}); "
-            f"at least {max(LAGS) + 3} are required"
+            f"at least {MIN_HISTORY_ROWS} are required"
         )
     return df
 
 
-def average_growth_rates(df: pd.DataFrame) -> dict[str, float]:
-    """Mean historical year-over-year growth rates of target and exogenous columns."""
+def carried_forward_years(raw: pd.DataFrame) -> dict[str, list[int]]:
+    """Years whose exogenous values are missing and carried forward, per column."""
+    observed_before = raw[EXOG_COLUMNS].ffill().notna()
+    missing = raw[EXOG_COLUMNS].isna() & observed_before
     return {
-        "y_growth": float(df["y"].pct_change().mean()),
-        "gdp_growth": float(df["gdp"].pct_change().mean()),
-        "population_growth": float(df["population"].pct_change().mean()),
-        "renewables_growth": float(df["renewables_share_energy"].pct_change().mean()),
+        col: raw.loc[missing[col], "year"].astype(int).tolist()
+        for col in EXOG_COLUMNS
+        if missing[col].any()
     }
+
+
+def load_energy_data(data_path: str | Path) -> pd.DataFrame:
+    """Read the dataset and return the imputed history used for modelling."""
+    return prepare_history(read_energy_csv(data_path))
+
+
+def exogenous_growth_rates(
+    raw: pd.DataFrame, window: int = GROWTH_WINDOW_YEARS
+) -> dict[str, float]:
+    """
+    Compound annual growth rate of each exogenous variable over the trailing
+    ``window`` years, using observed (non-imputed) values only.
+
+    Returns 0.0 for a variable without two positive observations in the window.
+    """
+    last_year = int(raw["year"].iloc[-1])
+    recent = raw[raw["year"] > last_year - window]
+    rates = {}
+    for col in EXOG_COLUMNS:
+        observed = recent[["year", col]].dropna()
+        observed = observed[observed[col] > 0]
+        if len(observed) < 2:
+            rates[col] = 0.0
+            continue
+        first, last = observed.iloc[0], observed.iloc[-1]
+        years = float(last["year"] - first["year"])
+        rates[col] = float((last[col] / first[col]) ** (1.0 / years) - 1.0)
+    return rates
+
+
+def project_exogenous(
+    last_row: pd.Series, growth_rates: dict[str, float], steps_ahead: int
+) -> dict[str, float]:
+    """Project exogenous variables ``steps_ahead`` years past ``last_row``."""
+    projected = {
+        col: float(last_row[col] * (1.0 + growth_rates[col]) ** steps_ahead)
+        for col in EXOG_COLUMNS
+    }
+    projected["renewables_share_energy"] = min(
+        projected["renewables_share_energy"], 100.0
+    )
+    return projected
+
+
+def exogenous_path(
+    last_row: pd.Series, growth_rates: dict[str, float], horizon: int
+) -> pd.DataFrame:
+    """Projected exogenous values for the next ``horizon`` years."""
+    last_year = int(last_row["year"])
+    rows = [
+        {"year": last_year + step, **project_exogenous(last_row, growth_rates, step)}
+        for step in range(1, horizon + 1)
+    ]
+    return pd.DataFrame(rows, columns=["year", *EXOG_COLUMNS])
 
 
 def _window_slope(window: np.ndarray) -> np.ndarray:
@@ -79,51 +185,51 @@ def _window_slope(window: np.ndarray) -> np.ndarray:
     )
 
 
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = numerator / denominator
+    return np.where(np.isfinite(result) & (denominator > 0), result, np.nan)
+
+
 def compute_features(
     y_history: np.ndarray,
     *,
     year: int,
     year_min: int,
-    population: np.ndarray | float,
-    gdp: np.ndarray | float,
-    renewables_share_energy: np.ndarray | float,
-    prev_gdp: np.ndarray | float,
-    growth_rates: dict[str, float],
+    population: float,
+    gdp: float,
+    renewables_share_energy: float,
+    prev_gdp: float,
 ) -> pd.DataFrame:
     """
-    Build the feature rows for ``year`` for one or more independent series.
+    Build the feature row for ``year``.
 
     Args:
-        y_history: Array of shape (n_series, n_past) with target values of all
-            years before ``year`` (oldest first).
+        y_history: Target values of all years before ``year`` (oldest first),
+            shape (n_past,) or (1, n_past).
         year: Year the features are built for.
         year_min: First year of the training data (anchor for time features).
         population, gdp, renewables_share_energy: Exogenous values for ``year``.
         prev_gdp: GDP of the previous year (used for lagged energy intensity).
-        growth_rates: Output of :func:`average_growth_rates`.
 
     Returns:
-        DataFrame with one row per series. Features that need more history than
-        available are NaN.
+        Single-row DataFrame. Features needing unavailable history are NaN.
     """
-    y_history = np.atleast_2d(np.asarray(y_history, dtype=float))
-    n_series, n_past = y_history.shape
-    nan = np.full(n_series, np.nan)
-
-    def full(value) -> np.ndarray:
-        return np.broadcast_to(np.asarray(value, dtype=float), (n_series,)).copy()
+    y_history = np.asarray(y_history, dtype=float).reshape(1, -1)
+    n_past = y_history.shape[1]
+    nan = np.array([np.nan])
 
     def lag(k: int) -> np.ndarray:
         return y_history[:, -k].copy() if n_past >= k else nan.copy()
 
     year_index = float(year - year_min)
     feats: dict[str, np.ndarray] = {
-        "year": full(year),
-        "year_index": full(year_index),
-        "year_squared": full(year_index**2),
-        "year_cubic": full(year_index**3),
-        "year_sin": full(np.sin(2 * np.pi * year_index / SEASONAL_PERIOD)),
-        "year_cos": full(np.cos(2 * np.pi * year_index / SEASONAL_PERIOD)),
+        "year": np.array([float(year)]),
+        "year_index": np.array([year_index]),
+        "year_squared": np.array([year_index**2]),
+        "year_cubic": np.array([year_index**3]),
+        "year_sin": np.array([np.sin(2 * np.pi * year_index / SEASONAL_PERIOD)]),
+        "year_cos": np.array([np.cos(2 * np.pi * year_index / SEASONAL_PERIOD)]),
     }
 
     for k in LAGS:
@@ -132,10 +238,10 @@ def compute_features(
     feats["y_diff2"] = feats["y_lag1"] - 2 * feats["y_lag2"] + feats["y_lag3"]
 
     for window in ROLLING_WINDOWS:
-        values = y_history[:, -window:] if n_past else None
-        if values is None:
+        if n_past == 0:
             mean = std = vmin = vmax = nan
         else:
+            values = y_history[:, -window:]
             mean = values.mean(axis=1)
             std = values.std(axis=1, ddof=1) if values.shape[1] > 1 else nan
             vmin, vmax = values.min(axis=1), values.max(axis=1)
@@ -144,48 +250,42 @@ def compute_features(
         feats[f"y_rolling_min_{window}"] = vmin
         feats[f"y_rolling_max_{window}"] = vmax
 
-    feats["trend_5yr"] = (
-        _window_slope(y_history[:, -TREND_WINDOW:]) if n_past else nan.copy()
-    )
+    feats["trend_5yr"] = _window_slope(y_history[:, -TREND_WINDOW:]) if n_past else nan
 
-    population = full(population)
-    gdp = full(gdp)
-    renewables = full(renewables_share_energy)
-    feats["population"] = population
-    feats["gdp"] = gdp
+    population_arr = np.array([float(population)])
+    gdp_arr = np.array([float(gdp)])
+    renewables = np.array([float(renewables_share_energy)])
+    feats["population"] = population_arr
+    feats["gdp"] = gdp_arr
     feats["renewables_share_energy"] = renewables
-    feats["gdp_growth_feature"] = full(growth_rates["gdp_growth"])
-    feats["population_growth_feature"] = full(growth_rates["population_growth"])
-    feats["renewables_growth_feature"] = full(growth_rates["renewables_growth"])
-    feats["gdp_per_capita"] = gdp / population
+    feats["gdp_per_capita"] = _safe_divide(gdp_arr, population_arr)
     # Last observed intensity (previous year) to avoid leaking the current target.
-    feats["energy_intensity"] = feats["y_lag1"] / full(prev_gdp)
+    feats["energy_intensity"] = _safe_divide(
+        feats["y_lag1"], np.array([float(prev_gdp)])
+    )
     feats["renewables_impact"] = renewables * feats["gdp_per_capita"]
 
     return pd.DataFrame(feats)
 
 
 def build_training_frame(
-    df: pd.DataFrame, growth_rates: dict[str, float], feature_names: list[str]
+    df: pd.DataFrame, feature_names: list[str]
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Build the supervised (features at t -> target y_t) training set."""
     y_values = df["y"].to_numpy(dtype=float)
     year_min = int(df["year"].iloc[0])
-    rows = []
-    for t in range(len(df)):
-        row = df.iloc[t]
-        rows.append(
-            compute_features(
-                y_values[:t].reshape(1, -1),
-                year=int(row["year"]),
-                year_min=year_min,
-                population=row["population"],
-                gdp=row["gdp"],
-                renewables_share_energy=row["renewables_share_energy"],
-                prev_gdp=df["gdp"].iloc[t - 1] if t > 0 else np.nan,
-                growth_rates=growth_rates,
-            )
+    rows = [
+        compute_features(
+            y_values[:t],
+            year=int(df["year"].iloc[t]),
+            year_min=year_min,
+            population=df["population"].iloc[t],
+            gdp=df["gdp"].iloc[t],
+            renewables_share_energy=df["renewables_share_energy"].iloc[t],
+            prev_gdp=df["gdp"].iloc[t - 1] if t > 0 else np.nan,
         )
+        for t in range(len(df))
+    ]
     features = pd.concat(rows, ignore_index=True)[feature_names]
     valid = features.notna().all(axis=1).to_numpy()
     return (
@@ -194,32 +294,36 @@ def build_training_frame(
     )
 
 
-def project_exogenous(
-    last_row: pd.Series,
-    growth_rates: dict[str, float],
-    steps_ahead: int,
-    factors: np.ndarray,
-) -> dict[str, np.ndarray]:
+def recursive_forecast(
+    predict: Callable[[pd.DataFrame], np.ndarray],
+    history: pd.DataFrame,
+    exog: pd.DataFrame,
+    feature_names: list[str],
+) -> np.ndarray:
     """
-    Project exogenous variables ``steps_ahead`` years past ``last_row``.
-
-    ``factors`` has shape (n_series, 3) and scales the population, GDP and
-    renewables growth rates per series.
+    Recursive multi-step forecast: each predicted year is appended to the
+    target history used for the next year's features.
     """
-    pop = (
-        last_row["population"]
-        * (1 + growth_rates["population_growth"] * factors[:, 0]) ** steps_ahead
-    )
-    gdp = (
-        last_row["gdp"]
-        * (1 + growth_rates["gdp_growth"] * factors[:, 1]) ** steps_ahead
-    )
-    renew = (
-        last_row["renewables_share_energy"]
-        * (1 + growth_rates["renewables_growth"] * factors[:, 2]) ** steps_ahead
-    )
-    return {
-        "population": pop,
-        "gdp": gdp,
-        "renewables_share_energy": np.minimum(renew, 100.0),
-    }
+    y_history = history["y"].to_numpy(dtype=float).tolist()
+    year_min = int(history["year"].iloc[0])
+    prev_gdp = float(history["gdp"].iloc[-1])
+    predictions = []
+    for row in exog.itertuples(index=False):
+        features = compute_features(
+            np.asarray(y_history),
+            year=int(row.year),
+            year_min=year_min,
+            population=row.population,
+            gdp=row.gdp,
+            renewables_share_energy=row.renewables_share_energy,
+            prev_gdp=prev_gdp,
+        )[feature_names]
+        if not np.isfinite(features.to_numpy(dtype=float)).all():
+            raise ValueError(f"Non-finite features for year {row.year}")
+        prediction = float(predict(features)[0])
+        if not np.isfinite(prediction):
+            raise ValueError(f"Non-finite prediction for year {row.year}")
+        predictions.append(prediction)
+        y_history.append(prediction)
+        prev_gdp = float(row.gdp)
+    return np.asarray(predictions)
