@@ -17,6 +17,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+# Prophet logs an ERROR at import when the optional plotly dependency is
+# missing; plotting is not used by this service.
+logging.getLogger("prophet.plot").setLevel(logging.CRITICAL)
+
+# pylint: disable=wrong-import-position
 import prophet
 from cmdstanpy.utils import get_logger as get_cmdstanpy_logger
 from prophet import Prophet
