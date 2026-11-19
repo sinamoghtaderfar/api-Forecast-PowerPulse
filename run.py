@@ -1,21 +1,24 @@
 """
 Entry point for the PowerPulse FastAPI server.
 
-Host, port and auto-reload can be overridden with the POWERPULSE_HOST,
-POWERPULSE_PORT and POWERPULSE_RELOAD environment variables.
+Configuration (environment variables): POWERPULSE_HOST (default 127.0.0.1),
+POWERPULSE_PORT (default 8000), POWERPULSE_RELOAD (default off; enable only
+for development) and POWERPULSE_LOG_LEVEL (default info).
 """
 
 import logging
-import os
 
 import uvicorn
 
+from app.config import get_settings
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level.upper())
     uvicorn.run(
         app="app.main:app",
-        host=os.getenv("POWERPULSE_HOST", "0.0.0.0"),
-        port=int(os.getenv("POWERPULSE_PORT", "8000")),
-        reload=os.getenv("POWERPULSE_RELOAD", "1") == "1",
-        log_level="info",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.reload,
+        log_level=settings.log_level,
     )

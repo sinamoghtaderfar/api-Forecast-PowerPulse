@@ -1,32 +1,46 @@
 """
 ProphetForecastService module.
 
-Trains a Prophet time series model on Germany energy data with population, GDP
-and renewables_share_energy as additional regressors, and generates multi-year
-forecasts including uncertainty intervals.
+Prophet model of annual German electricity generation (TWh) with population,
+GDP and renewables share as additional regressors. Future regressor values are
+projected with the shared exogenous growth assumptions; prediction intervals
+come from rolling-origin backtest residuals (see ``app.services.uncertainty``)
+rather than Prophet's own intervals, which ignore regressor uncertainty.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+# Prophet logs an ERROR at import when the optional plotly dependency is
+# missing; plotting is not used by this service.
+logging.getLogger("prophet.plot").setLevel(logging.CRITICAL)
+
+# pylint: disable=wrong-import-position
 import prophet
+from cmdstanpy.utils import get_logger as get_cmdstanpy_logger
 from prophet import Prophet
 from prophet.serialize import model_from_json, model_to_json
 
-from app.services.base import BaseForecastService, ForecastRows
+from app.services.base import BaseForecastService
 from app.services.features import EXOG_COLUMNS
 
 logger = logging.getLogger(__name__)
+# cmdstanpy configures its logger lazily; initialise it, then silence INFO noise.
+get_cmdstanpy_logger().setLevel(logging.WARNING)
+logging.getLogger("prophet").setLevel(logging.WARNING)
 
-# Annual growth assumptions for the future regressor values.
-POPULATION_GROWTH = 0.01
-GDP_GROWTH = 0.02
-RENEWABLES_GROWTH = 0.03
+
+def _to_prophet_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out["ds"] = pd.to_datetime(out["year"].astype(int).astype(str) + "-01-01")
+    return out
 
 
 class ProphetForecastService(BaseForecastService):
@@ -34,7 +48,6 @@ class ProphetForecastService(BaseForecastService):
 
     model_name = "Prophet"
     model_filename = "prophet_model.json"
-    model_version = "2"
 
     @property
     def last_values(self) -> dict[str, float] | None:
@@ -46,23 +59,26 @@ class ProphetForecastService(BaseForecastService):
     def _library_versions(self) -> list[str]:
         return [f"prophet={prophet.__version__}"]
 
-    def _training_frame(self) -> pd.DataFrame:
-        df = self.df[["year", "y", *EXOG_COLUMNS]].copy()
-        df["ds"] = pd.to_datetime(df["year"].astype(str) + "-01-01")
-        return df[["ds", "y", *EXOG_COLUMNS]]
-
-    def _fit(self) -> None:
+    def _fit_model(self, history: pd.DataFrame) -> Prophet:
         model = Prophet(
             yearly_seasonality=False,
             weekly_seasonality=False,
             daily_seasonality=False,
             growth="linear",
-            interval_width=0.95,
+            # Intervals are calibrated empirically; skip Prophet's sampling.
+            uncertainty_samples=0,
         )
         for col in EXOG_COLUMNS:
             model.add_regressor(col)
-        model.fit(self._training_frame())
-        self.model = model
+        model.fit(_to_prophet_frame(history)[["ds", "y", *EXOG_COLUMNS]])
+        return model
+
+    def _predict_point(
+        self, model: Prophet, history: pd.DataFrame, exog: pd.DataFrame
+    ) -> np.ndarray:
+        del history
+        result = model.predict(_to_prophet_frame(exog)[["ds", *EXOG_COLUMNS]])
+        return result["yhat"].to_numpy(dtype=float)
 
     def _serialize(self) -> dict[str, Any]:
         return {"model_json": model_to_json(self.model)}
@@ -70,39 +86,8 @@ class ProphetForecastService(BaseForecastService):
     def _deserialize(self, payload: dict[str, Any]) -> None:
         self.model = model_from_json(payload["model_json"])
 
-    def _write_payload(self, payload: dict[str, Any]) -> None:
-        self.model_path.write_text(json.dumps(payload), encoding="utf-8")
+    def _write_payload(self, payload: dict[str, Any], path: Path) -> None:
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     def _read_payload(self) -> dict[str, Any]:
         return json.loads(self.model_path.read_text(encoding="utf-8"))
-
-    def _predict(self, years_ahead: int) -> ForecastRows:
-        steps = np.arange(1, years_ahead + 1)
-        last = self.last_values
-        future = pd.DataFrame(
-            {
-                "ds": pd.date_range(
-                    start=pd.Timestamp(f"{self.last_year + 1}-01-01"),
-                    periods=years_ahead,
-                    freq="YS",
-                ),
-                "population": last["population"] * (1 + POPULATION_GROWTH) ** steps,
-                "gdp": last["gdp"] * (1 + GDP_GROWTH) ** steps,
-                "renewables_share_energy": np.minimum(
-                    last["renewables_share_energy"] * (1 + RENEWABLES_GROWTH) ** steps,
-                    100.0,
-                ),
-            }
-        )
-        result = self.model.predict(future)
-        return [
-            {
-                "year": int(ds.year),
-                "forecast": float(yhat),
-                "lower": float(lower),
-                "upper": float(upper),
-            }
-            for ds, yhat, lower, upper in zip(
-                result["ds"], result["yhat"], result["yhat_lower"], result["yhat_upper"]
-            )
-        ]
