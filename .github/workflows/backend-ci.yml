@@ -1,3 +1,4 @@
+
 name: Backend CI
 
 on:
@@ -41,7 +42,10 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Check formatting
-        run: python -m black --check app run.py
+        run: python -m black --check app tests run.py
+
+      - name: Lint
+        run: python -m pylint app run.py
 
       - name: Run tests
         run: python -m pytest -q
