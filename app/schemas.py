@@ -49,13 +49,60 @@ class ModelSummary(BaseModel):
     avg_uncertainty_width: Optional[FiniteFloat] = None
 
 
+class CoverageStat(BaseModel):
+    """Backtested (sequential, no look-ahead) interval coverage."""
+
+    n: int
+    coverage: float
+    mean_width: float
+
+
 class IntervalInfo(BaseModel):
-    """How the prediction intervals were obtained."""
+    """How the prediction intervals were obtained and how they performed."""
 
     method: str
     nominal_coverage: float
     max_calibrated_horizon: int
     residuals_per_horizon: dict[str, int]
+    scale_twh: Optional[float] = Field(
+        None, description="Volatility scale (std of the last annual changes) in TWh"
+    )
+    scale_window_years: Optional[int] = None
+    pooled_horizons: Optional[int] = None
+    score_quantile: Optional[float] = None
+    backtest_coverage: dict[str, CoverageStat] = Field(
+        default_factory=dict,
+        description="Coverage of intervals built without look-ahead, by horizon range",
+    )
+    validated_coverage: bool = Field(
+        False, description="Never true: coverage is backtested, not guaranteed"
+    )
+
+
+class HorizonEvidence(BaseModel):
+    """Backtest accuracy at one horizon (origins >= 2000)."""
+
+    n: int
+    mae: float
+    bias: float = Field(description="Mean forecast - actual in TWh (>0 = too high)")
+    relative_mae: Optional[float] = Field(
+        None, description="MAE divided by the persistence benchmark's MAE"
+    )
+
+
+class ModelEvidence(BaseModel):
+    """Out-of-sample backtest accuracy of one model."""
+
+    first_origin: int
+    by_horizon: dict[str, HorizonEvidence]
+    mean_relative_mae_h1_10: Optional[float] = None
+
+
+class HorizonGuidanceItem(BaseModel):
+    """How much evidence supports forecasts in a horizon range."""
+
+    years: str
+    evidence: str
 
 
 class Units(BaseModel):
@@ -64,8 +111,9 @@ class Units(BaseModel):
     target: str = TARGET
     forecast: str = UNIT
     uncertainty: str = (
-        "empirical prediction interval targeting 95% coverage from rolling-origin "
-        "backtest residuals; backtested coverage was below nominal (see README)"
+        "empirical interval targeting 95% coverage from rolling-origin backtest "
+        "residuals (volatility-scaled conformal, horizons 1-10 only); coverage is "
+        "not guaranteed (see README)"
     )
 
 
@@ -75,6 +123,7 @@ class ForecastsByModel(BaseModel):
     prophet: list[ForecastPoint]
     random_forest: list[RandomForestPoint]
     xgboost: list[XGBoostPoint]
+    persistence: list[ForecastPoint] = Field(default_factory=list)
 
 
 class AllMetadata(BaseModel):
@@ -85,6 +134,18 @@ class AllMetadata(BaseModel):
     units: Units = Field(default_factory=Units)
     intervals: dict[str, Optional[IntervalInfo]] = Field(default_factory=dict)
     unavailable_models: list[str] = Field(default_factory=list)
+    benchmark_model: str = "persistence"
+    recommended_model: Optional[str] = Field(
+        None,
+        description=(
+            "Lowest backtest MAE over horizons 1-10; the benchmark unless another "
+            "model beats it by more than 2 %"
+        ),
+    )
+    evidence: dict[str, Optional[ModelEvidence]] = Field(default_factory=dict)
+    horizon_guidance: dict[str, HorizonGuidanceItem] = Field(default_factory=dict)
+    assumptions: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AllForecastsResponse(BaseModel):
@@ -101,6 +162,10 @@ class SingleMetadata(BaseModel):
     years_ahead: int
     units: Units = Field(default_factory=Units)
     interval: Optional[IntervalInfo] = None
+    evidence: Optional[ModelEvidence] = None
+    horizon_guidance: dict[str, HorizonGuidanceItem] = Field(default_factory=dict)
+    assumptions: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SingleForecastResponse(BaseModel):

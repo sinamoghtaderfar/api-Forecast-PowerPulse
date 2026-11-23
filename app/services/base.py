@@ -26,7 +26,12 @@ from app.services.features import (
     prepare_history,
     read_energy_csv,
 )
-from app.services.uncertainty import DEFAULT_LEVEL, ResidualCalibration
+from app.services.uncertainty import (
+    DEFAULT_LEVEL,
+    DEFAULT_MAX_HORIZON,
+    DEFAULT_SCALE_WINDOW,
+    ScaledResidualCalibration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,18 @@ def validate_years_ahead(years_ahead: int) -> int:
     return years_ahead
 
 
+def physical_floor(point: np.ndarray) -> np.ndarray:
+    """
+    Electricity generation cannot be negative: clip point forecasts at 0 TWh.
+
+    Applied identically in backtests and production. No backtest forecast of
+    the shipped models was negative; the floor only binds for far-out,
+    unvalidated horizons (e.g. Prophet driven by compounding exogenous
+    projections) and is reported in the API metadata ``warnings``.
+    """
+    return np.maximum(np.asarray(point, dtype=float), 0.0)
+
+
 def growth_pct(current: float, previous: float) -> float | None:
     """Percentage change; None when undefined (non-positive or non-finite base)."""
     if not (np.isfinite(current) and np.isfinite(previous)) or previous <= 0:
@@ -65,8 +82,11 @@ class BaseForecastService(ABC):
 
     model_name: str = ""
     model_filename: str = ""
-    # Bump when features/hyperparameters change so persisted models are retrained.
-    model_version: str = "3"
+    # Bump when features/hyperparameters/calibration change so persisted models
+    # are retrained. v4: volatility-scaled pooled conformal intervals.
+    model_version: str = "4"
+    # Whether the model uses the exogenous variables (and their projections).
+    uses_exogenous: bool = True
 
     def __init__(
         self,
@@ -84,7 +104,7 @@ class BaseForecastService(ABC):
         self.raw: pd.DataFrame | None = None
         self.df: pd.DataFrame | None = None
         self.model: Any = None
-        self.calibration: ResidualCalibration | None = None
+        self.calibration: ScaledResidualCalibration | None = None
         self.last_row: pd.Series | None = None
         self.last_year: int | None = None
         self.growth_rates: dict[str, float] = {}
@@ -103,7 +123,8 @@ class BaseForecastService(ABC):
         config = (
             f"{type(self).__name__}:{self.model_version}:calibrate={self.calibrate}:"
             f"level={self.interval_level}:min_train={backtesting.MIN_TRAIN_YEARS}:"
-            f"growth_window={features.GROWTH_WINDOW_YEARS}"
+            f"growth_window={features.GROWTH_WINDOW_YEARS}:"
+            f"interval_max_h={DEFAULT_MAX_HORIZON}:scale_window={DEFAULT_SCALE_WINDOW}"
         )
         digest.update(config.encode())
         for part in self._library_versions():
@@ -150,11 +171,14 @@ class BaseForecastService(ABC):
         history = prepare_history(raw)
         exog = exogenous_path(history.iloc[-1], exogenous_growth_rates(raw), horizon)
         model = self._fit_model(history)
-        return self._predict_point(model, history, exog)
+        return physical_floor(self._predict_point(model, history, exog))
 
-    def _calibrate(self) -> ResidualCalibration:
+    def _calibrate(self) -> ScaledResidualCalibration:
         records = backtesting.rolling_origin_backtest(self.forecast_from_raw, self.raw)
-        return ResidualCalibration.from_records(records, self.interval_level)
+        target = dict(zip(self.raw["year"].astype(int), self.raw["y"].astype(float)))
+        return ScaledResidualCalibration.from_backtest(
+            records, target, level=self.interval_level
+        )
 
     def uncertainty_info(self) -> dict[str, Any] | None:
         """Description of the interval method and its evidence."""
@@ -181,6 +205,7 @@ class BaseForecastService(ABC):
         point = self._predict_point(self.model, self.df, exog)
         if point.shape != (years_ahead,) or not np.isfinite(point).all():
             raise ValueError(f"{self.model_name} produced invalid predictions")
+        point = physical_floor(point)
         widths = (
             self.calibration.half_widths(years_ahead)
             if self.calibration
@@ -231,7 +256,9 @@ class BaseForecastService(ABC):
             self._deserialize(payload)
             calibration = payload.get("calibration")
             self.calibration = (
-                ResidualCalibration.from_dict(calibration) if calibration else None
+                ScaledResidualCalibration.from_dict(calibration)
+                if calibration
+                else None
             )
             return True
         except Exception:  # pylint: disable=broad-except

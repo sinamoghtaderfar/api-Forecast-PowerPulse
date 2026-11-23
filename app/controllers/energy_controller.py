@@ -19,6 +19,12 @@ from app.schemas import (
     XGBoostPoint,
 )
 from app.services.base import MAX_YEARS_AHEAD, BaseForecastService, ForecastRows
+from app.services.evidence import (
+    HORIZON_GUIDANCE,
+    assumptions,
+    model_evidence,
+    recommended_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,7 @@ ROW_MODELS = {
     "prophet": ForecastPoint,
     "random_forest": RandomForestPoint,
     "xgboost": XGBoostPoint,
+    "persistence": ForecastPoint,
 }
 
 
@@ -81,6 +88,18 @@ def calculate_model_summary(
     }
 
 
+def forecast_warnings(key: str, rows: ForecastRows) -> list[str]:
+    """Warnings about physically bounded (0 TWh) or unvalidated forecast rows."""
+    floored = [row["year"] for row in rows if row["forecast"] <= 0.0]
+    if not floored:
+        return []
+    return [
+        f"{key}: forecast reached the physical lower bound of 0 TWh from "
+        f"{floored[0]} (unvalidated extrapolation driven by the model's trend and "
+        "exogenous assumptions; do not use as a forecast)"
+    ]
+
+
 def _unavailable(service: BaseForecastService) -> HTTPException:
     return HTTPException(
         status_code=503, detail=f"{service.model_name} model is not available"
@@ -108,12 +127,18 @@ def _single_model_response(key: str, years_ahead: int) -> dict[str, Any]:
     service = SERVICES[key]
     forecast = _run_forecast(service, years_ahead)
     rows = [ROW_MODELS[key].model_validate(row).model_dump() for row in forecast]
+    evidence = model_evidence(SERVICES)
     return {
         "model": key,
         "forecast": rows,
         "summary": calculate_model_summary(rows, service.model_name),
         "metadata": SingleMetadata(
-            years_ahead=years_ahead, interval=service.uncertainty_info()
+            years_ahead=years_ahead,
+            interval=service.uncertainty_info(),
+            evidence=evidence.get(key),
+            horizon_guidance=HORIZON_GUIDANCE,
+            assumptions=assumptions(SERVICES) if service.uses_exogenous else {},
+            warnings=forecast_warnings(key, rows),
         ),
     }
 
@@ -134,6 +159,7 @@ def get_all_forecasts(years_ahead: int = YearsAhead) -> dict[str, Any]:
     if len(unavailable) == len(SERVICES):
         raise HTTPException(status_code=503, detail="No forecasting model is available")
 
+    evidence = model_evidence(SERVICES)
     return {
         "forecasts": forecasts,
         "summaries": {
@@ -145,6 +171,15 @@ def get_all_forecasts(years_ahead: int = YearsAhead) -> dict[str, Any]:
             models=list(SERVICES),
             intervals={key: s.uncertainty_info() for key, s in SERVICES.items()},
             unavailable_models=unavailable,
+            recommended_model=recommended_model(
+                {k: v for k, v in evidence.items() if k not in unavailable}
+            ),
+            evidence=evidence,
+            horizon_guidance=HORIZON_GUIDANCE,
+            assumptions=assumptions(SERVICES),
+            warnings=[
+                w for key in SERVICES for w in forecast_warnings(key, forecasts[key])
+            ],
         ),
     }
 
@@ -165,3 +200,9 @@ def get_random_forest_forecast(years_ahead: int = YearsAhead) -> dict[str, Any]:
 def get_xgboost_forecast(years_ahead: int = YearsAhead) -> dict[str, Any]:
     """XGBoost forecast."""
     return _single_model_response("xgboost", years_ahead)
+
+
+@router.get("/persistence", response_model=SingleForecastResponse)
+def get_persistence_forecast(years_ahead: int = YearsAhead) -> dict[str, Any]:
+    """Persistence (last observed value) benchmark forecast."""
+    return _single_model_response("persistence", years_ahead)

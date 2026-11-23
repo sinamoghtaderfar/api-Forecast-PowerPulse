@@ -15,6 +15,8 @@ ROW_FIELDS = {
         "growth_rate",
     },
     "xgboost": {"year", "forecast", "lower", "upper", "growth_from_previous"},
+    # Added in API 1.2 (additive): the persistence benchmark.
+    "persistence": {"year", "forecast", "lower", "upper"},
 }
 
 

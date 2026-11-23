@@ -2,7 +2,8 @@
 Main application file for the Germany Energy Forecast API.
 
 Initializes the FastAPI app, configures CORS, loads/trains the forecasting
-models (Prophet, Random Forest, XGBoost) on startup and registers the routes.
+models (Prophet, Random Forest, XGBoost and the persistence benchmark) on
+startup and registers the routes.
 A model that fails to load is reported as unavailable instead of preventing
 the API from starting.
 """
@@ -23,6 +24,7 @@ from app.controllers.energy_controller import router as energy_router
 # Service instances are re-exported for backward compatibility.
 from app.dependencies import (  # noqa: F401  # pylint: disable=unused-import
     SERVICES,
+    persistence_service,
     prophet_service,
     random_forest_service,
     xgboost_service,
@@ -31,7 +33,7 @@ from app.schemas import HealthResponse
 
 logger = logging.getLogger(__name__)
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 
 
 def load_models() -> None:
@@ -82,6 +84,7 @@ def root() -> dict[str, Any]:
             "prophet": "/forecast/prophet",
             "random_forest": "/forecast/random-forest",
             "xgboost": "/forecast/xgboost",
+            "persistence": "/forecast/persistence",
             "all_models": "/forecast/all",
         },
     }
