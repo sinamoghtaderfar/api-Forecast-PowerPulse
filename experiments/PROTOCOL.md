@@ -107,4 +107,29 @@ without increasing it at any of these horizons by more than 2 %.
 
 ## Deviations
 
-(Filled in after the experiments.)
+Recorded after the experiments; the data split, the candidate list and the
+promotion rule above were **not** changed.
+
+1. **Volatility-scaled intervals (post hoc).** All three pre-registered interval
+   methods under-covered (sequential coverage 0.50–0.81 at 95 % nominal). Four
+   volatility-scaled variants were then tried (`scaled_w5_pall`, `scaled_w10_pall`,
+   `scaled_w10_p5`, `scaled_w10_p10`; window of annual changes for sigma / largest
+   pooled horizon). `scaled_w10_p10` was adopted: the 10-year window matches the
+   existing `GROWTH_WINDOW_YEARS`, and pooling horizons 1–10 matches the horizon
+   range that the backtest can evaluate. Because the choice among four variants was
+   made after seeing all periods, the reported coverage is mildly optimistic.
+2. **Testability guard.** The DM test and block bootstrap are reported only when
+   there are at least 2h + 2 paired forecasts (added after the h = 10 results with
+   n = 16 and block length 10 were seen to be degenerate). No conclusion depended on
+   the dropped values.
+3. **Physical floor (post hoc).** A new test found that the existing Prophet
+   service forecasts negative generation from 2045 (h = 20). A log-target Prophet
+   was tried once and rejected (FULL MAE h = 10: 65.4 → 100.6 TWh). Point forecasts
+   are instead floored at 0 TWh in backtests and production; no backtest forecast
+   was negative, so no backtest metric changed.
+4. **Persistence served as benchmark.** Not a candidate: since no candidate passed
+   the rule, the benchmark itself is exposed in the API as the reference/recommended
+   forecast.
+5. All candidates were run in one batch, so FULL, DEV and HOLDOUT results were
+   visible together. The promotion decision is mechanical under the fixed rule;
+   any later idea (items 1 and 3) can no longer be confirmed on an untouched holdout.

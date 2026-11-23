@@ -42,7 +42,7 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Check formatting
-        run: python -m black --check app tests run.py
+        run: python -m black --check app tests run.py experiments
 
       - name: Lint
         run: python -m pylint app run.py
