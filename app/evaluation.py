@@ -5,10 +5,16 @@ Usage: ``python -m app.evaluation [--first-origin 2000] [--json report.json]``
 
 * Point accuracy: genuine recursive forecasts from every origin year
   ``>= first_origin`` (expanding window), compared with persistence and drift
-  baselines; MAE, RMSE (TWh) and sMAPE (%) per horizon.
+  baselines; MAE, RMSE (TWh), sMAPE (%), WAPE (%) and bias (forecast - actual,
+  TWh) per horizon.
 * Interval coverage: for each origin/horizon the interval is built only from
   residuals whose target year was already observed at that origin (no
-  look-ahead), exactly as the production calibration would have been.
+  look-ahead). ``intervals`` evaluates the production method
+  (volatility-scaled pooled conformal, horizons 1-10);
+  ``intervals_legacy_per_horizon`` the pre-v4 per-horizon method.
+
+The research experiments (more candidates, DEV/HOLDOUT split, paired tests)
+live in the separate ``experiments`` package.
 
 Models are fitted with the same code and hyperparameters as in production
 (``forecast_from_raw``). Fixed random seeds make results reproducible.
@@ -28,9 +34,15 @@ import pandas as pd
 from app.services.backtesting import BacktestRecord, rolling_origin_backtest
 from app.services.base import DEFAULT_DATA_PATH
 from app.services.features import read_energy_csv
+from app.services.persistence_service import PersistenceForecastService
 from app.services.prophet_service import ProphetForecastService
 from app.services.random_forest_service import RandomForestForecastService
-from app.services.uncertainty import DEFAULT_LEVEL, ResidualCalibration
+from app.services.uncertainty import (
+    DEFAULT_LEVEL,
+    DEFAULT_MAX_HORIZON,
+    ResidualCalibration,
+    ScaledResidualCalibration,
+)
 from app.services.xgboost_service import XGBoostForecastService
 
 DEFAULT_FIRST_ORIGIN = 2000
@@ -50,7 +62,12 @@ def drift_forecast(raw: pd.DataFrame, horizon: int) -> np.ndarray:
 
 
 def point_metrics(records: list[BacktestRecord]) -> dict[str, float]:
-    """MAE, RMSE and symmetric MAPE (%) of a set of backtest records."""
+    """
+    MAE, RMSE, symmetric MAPE (%), WAPE (%) and bias of backtest records.
+
+    ``bias`` is the mean of forecast - actual (positive = over-forecast);
+    ``wape`` is sum|error| / sum|actual| * 100.
+    """
     actual = np.array([r.actual for r in records])
     predicted = np.array([r.predicted for r in records])
     error = actual - predicted
@@ -60,6 +77,8 @@ def point_metrics(records: list[BacktestRecord]) -> dict[str, float]:
         "mae": float(np.mean(np.abs(error))),
         "rmse": float(np.sqrt(np.mean(error**2))),
         "smape": float(smape),
+        "wape": float(np.sum(np.abs(error)) / np.sum(np.abs(actual)) * 100),
+        "bias": float(np.mean(-error)),
     }
 
 
@@ -67,7 +86,8 @@ def sequential_interval_coverage(
     records: list[BacktestRecord], level: float = DEFAULT_LEVEL
 ) -> dict[int, dict[str, float]]:
     """
-    Coverage of intervals that only use residuals observable at each origin.
+    Legacy (pre-v4) per-horizon method: coverage of intervals that only use
+    residuals observable at each origin.
 
     Returns per-horizon ``{"n": evaluated, "coverage": share, "mean_width": TWh}``;
     horizons where no interval could be formed are omitted.
@@ -91,6 +111,23 @@ def sequential_interval_coverage(
     }
 
 
+def scaled_interval_coverage(
+    records: list[BacktestRecord],
+    raw: pd.DataFrame,
+    first_origin: int = DEFAULT_FIRST_ORIGIN,
+    level: float = DEFAULT_LEVEL,
+) -> dict[str, dict[str, float]]:
+    """
+    Production method (volatility-scaled pooled conformal): sequential coverage
+    per horizon 1..10 and per horizon range, without look-ahead.
+    """
+    target = dict(zip(raw["year"].astype(int), raw["y"].astype(float)))
+    calibration = ScaledResidualCalibration.from_backtest(records, target, level)
+    groups = {str(h): (h, h) for h in range(1, DEFAULT_MAX_HORIZON + 1)}
+    groups.update({"1-3": (1, 3), "4-5": (4, 5), "6-10": (6, 10), "all": (1, 10)})
+    return calibration.sequential_coverage(first_origin=first_origin, groups=groups)
+
+
 def evaluate(
     raw: pd.DataFrame,
     first_origin: int = DEFAULT_FIRST_ORIGIN,
@@ -107,12 +144,20 @@ def evaluate(
         "xgboost": XGBoostForecastService(calibrate=False),
     }
     forecasters.update({key: s.forecast_from_raw for key, s in services.items()})
+    served = {"persistence", *services}
+    # The served persistence model must equal the persistence baseline.
+    check = rolling_origin_backtest(
+        PersistenceForecastService(calibrate=False).forecast_from_raw, raw
+    )
+    if check != rolling_origin_backtest(persistence_forecast, raw):
+        raise RuntimeError("Served persistence model differs from the baseline")
 
     report: dict[str, Any] = {
         "data_years": [int(raw["year"].iloc[0]), int(raw["year"].iloc[-1])],
         "first_origin": first_origin,
         "point": {},
         "intervals": {},
+        "intervals_legacy_per_horizon": {},
     }
     for name, forecaster in forecasters.items():
         records = rolling_origin_backtest(forecaster, raw)
@@ -122,8 +167,11 @@ def evaluate(
             for h in horizons
             if any(r.horizon == h for r in scored)
         }
-        if name in services:
-            report["intervals"][name] = {
+        if name in served:
+            report["intervals"][name] = scaled_interval_coverage(
+                records, raw, first_origin
+            )
+            report["intervals_legacy_per_horizon"][name] = {
                 str(h): v for h, v in sequential_interval_coverage(records).items()
             }
     return report
@@ -135,20 +183,38 @@ def format_report(report: dict[str, Any]) -> str:
         f"Data {report['data_years'][0]}-{report['data_years'][1]}, "
         f"origins >= {report['first_origin']} (expanding window, recursive).",
         "",
-        "| Model | h | n | MAE (TWh) | RMSE (TWh) | sMAPE (%) |",
-        "|---|---|---|---|---|---|",
+        "| Model | h | n | MAE (TWh) | RMSE (TWh) | sMAPE (%) | WAPE (%) | bias (TWh) |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for name, by_h in report["point"].items():
         for h, m in by_h.items():
             lines.append(
-                f"| {name} | {h} | {m['n']} | {m['mae']:.1f} | {m['rmse']:.1f} | {m['smape']:.1f} |"
+                f"| {name} | {h} | {m['n']} | {m['mae']:.1f} | {m['rmse']:.1f} "
+                f"| {m['smape']:.1f} | {m['wape']:.1f} | {m['bias']:+.1f} |"
             )
     lines += [
+        "",
+        "Production intervals (volatility-scaled conformal), sequential coverage:",
+        "",
+        "| Model | horizons | n | 95% interval coverage | mean width (TWh) |",
+        "|---|---|---|---|---|",
+    ]
+    for name, by_h in report["intervals"].items():
+        for h in ("1", "3", "5", "10", "1-3", "4-5", "6-10", "all"):
+            if h in by_h:
+                m = by_h[h]
+                lines.append(
+                    f"| {name} | {h} | {m['n']} | {m['coverage']:.2f} "
+                    f"| {m['mean_width']:.1f} |"
+                )
+    lines += [
+        "",
+        "Legacy per-horizon intervals (pre-v4), sequential coverage:",
         "",
         "| Model | h | n | 95% interval coverage | mean width (TWh) |",
         "|---|---|---|---|---|",
     ]
-    for name, by_h in report["intervals"].items():
+    for name, by_h in report["intervals_legacy_per_horizon"].items():
         for h, m in by_h.items():
             lines.append(
                 f"| {name} | {h} | {m['n']} | {m['coverage']:.2f} | {m['mean_width']:.1f} |"
